@@ -183,7 +183,14 @@ def get_google_logo(company_name: str):
 load_dotenv()
 
 # Retrieve API keys and URLs from environment variables
-OPENROUTER_API_KEY = os.getenv("OPEN_ROUTER_KEY")
+OPENROUTER_API_KEY = (
+    os.getenv("OPENROUTER_API_KEY")
+    or os.getenv("OPEN_ROUTER_KEY")
+)
+
+if not OPENROUTER_API_KEY:
+    raise ValueError("Missing OPENROUTER_API_KEY or OPEN_ROUTER_KEY in environment variables.")
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 print("🔑 Loaded OpenRouter Key:", bool(OPENROUTER_API_KEY))
@@ -468,153 +475,225 @@ Return JSON array: [{{"name": "...", "position": "...", "status": "Current"}}]
 
     return clean_data, formatted_text
 
-# ============================================================
-# 🔹 Corporate Events Generator
-# ============================================================
-def generate_corporate_events(company_name, text=""):
-    """
-    Generates a list of corporate events (M&A, IPOs, etc.) for a company from 2021–2025.
+# ============================================
+# FILE 1: generate_events.py (or your generator file)
+# ============================================
 
+def generate_corporate_events(company_name: str, max_events: int = 12) -> list:
+    """
+    Fetches and extracts corporate M&A events for a company using web search and LLM.
+    
     Args:
-        company_name (str): The name of the company.
-        text (str): Optional source text to extract events from.
-
+        company_name: Name of the company to search for
+        max_events: Maximum number of events to return
+        
     Returns:
-        str: Formatted string of events, or an error message if no events are found.
+        List of dictionaries with keys: "Date", "Event (short)", "Event type", "Event value (USD)"
     """
-    print(f"🚀 Extracting corporate events for {company_name}")
-    all_events = []
+    import os, json, re, requests, time
+    from serpapi import GoogleSearch
 
-    # Step 1: Extract events from provided text or Wikipedia
-    if text.strip():
-        wiki_prompt = f"""
-You are a professional business analyst.
+    OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPEN_ROUTER_KEY")
+    SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+    if not OPENROUTER_KEY or not SERPAPI_KEY:
+        print("Missing API keys")
+        return []
 
-TASK:
-Extract ONLY verifiable corporate events for {company_name} from the years **2021–2025**.
-Corporate events include: Mergers & Acquisitions, IPOs, Investments/Fundings, Spin-offs, and Partnerships.
+    print(f"Fetching corporate events for: {company_name}")
 
-OUTPUT RULES:
-- Output ONLY valid JSON.
-- JSON must be a single array of event objects.
-- Each object must have these exact fields:
-  description, date (YYYY-MM-DD), type, value
-- If any field is unknown, leave it empty (e.g. "").
-- Do NOT include explanations, markdown, or extra text outside the JSON.
-- Do NOT include events before 2021.
-
-EXAMPLE FORMAT:
-[
-  {{
-    "description": "Apple acquired Beats Electronics",
-    "date": "2014-05-28",
-    "type": "Acquisition",
-    "value": "$3 billion"
-  }}
-]
-
-SOURCE TEXT:
-{text[:4000]}
-"""
-        wiki_events = openrouter_chat("perplexity/sonar-pro", wiki_prompt, "Corporate Events Wikipedia")
+    def search(query):
         try:
-            events = json.loads(wiki_events)
-            if isinstance(events, list):
-                all_events.extend(events)
-                print("✅ Added events from Wikipedia/text")
-        except Exception:
-            print("⚠️ Failed to parse Wikipedia events")
+            params = {"q": query, "num": 25, "api_key": SERPAPI_KEY}  # Increased from 20 to 25
+            results = GoogleSearch(params).get_dict().get("organic_results", [])
+            return [
+                {
+                    "title": r.get('title', ''),
+                    "snippet": r.get('snippet', ''),
+                    "link": r.get('link', '')
+                }
+                for r in results[:25]  # Get more results per query
+            ]
+        except Exception as e:
+            print(f"Search error: {e}")
+            return []
 
-    # Step 2: Fallback to GPT for additional events
-    chatgpt_prompt = f"""
-You are a structured data extractor.
-
-TASK:
-List all major corporate events (M&A, IPOs, investments, spin-offs, or partnerships) involving {company_name}
-that occurred from **2021 to 2025**.
-
-OUTPUT RULES:
-- Return ONLY a valid JSON array.
-- Each array element must contain:
-  description, date (YYYY-MM-DD), type, value
-- No explanations, headers, markdown, or commentary.
-- Only include events within the 2021–2025 range.
-
-EXAMPLE OUTPUT:
-[
-  {{
-    "description": "Tesla announced a 3-for-1 stock split",
-    "date": "2022-08-25",
-    "type": "Corporate Action",
-    "value": ""
-  }}
-]
-"""
-    chatgpt_events = openrouter_chat("anthropic/claude-3.5-sonnet", chatgpt_prompt, "Corporate Events GPT")
-    try:
-        events = json.loads(chatgpt_events)
-        if isinstance(events, list):
-            all_events.extend(events)
-            print("✅ Added GPT events")
-    except Exception:
-        print("⚠️ Failed to parse GPT events")
-
-    # Step 3: Extract events from website/press via OpenRouter
-    site_events_prompt = f"""
-You are a corporate intelligence model.
-
-TASK:
-Based on online reports and reliable news coverage, list notable {company_name} events from 2021–2025.
-Include M&A, IPOs, investments, spin-offs, or large partnerships.
-
-OUTPUT RULES:
-- Return ONLY valid JSON.
-- JSON must be a single array of objects.
-- Each object fields: description, date (YYYY-MM-DD), type, value
-- No commentary or text outside JSON.
-
-EXAMPLE:
-[
-  {{
-    "description": "Google acquired Fitbit",
-    "date": "2021-01-14",
-    "type": "Acquisition",
-    "value": "$2.1 billion"
-  }}
-]
-"""
-    site_events = openrouter_chat("perplexity/sonar-pro", site_events_prompt, "Corporate Events Website")
-    try:
-        events = json.loads(site_events)
-        if isinstance(events, list):
-            all_events.extend(events)
-            print("✅ Added website/press events")
-    except Exception:
-        print("⚠️ Failed to parse website/press events")
-
-    # Step 4: Clean up and format events
-    if not all_events:
-        return f"⚠️ No corporate events found for {company_name}"
-
-    # Deduplicate events by description and date
-    unique_events = {}
-    for e in all_events:
-        desc = e.get("description", f"{company_name} Unknown Event")
-        date = e.get("date", "N/A")
-        typ = e.get("type", "Corporate Event")
-        val = e.get("value", "")
-        key = (desc.lower(), date)
-        unique_events[key] = {"description": desc, "date": date, "type": typ, "value": val}
-
-    # Sort events by date in descending order
-    sorted_events = sorted(unique_events.values(), key=lambda x: parse_date(x["date"]), reverse=True)
-
-    # Format events into a readable string
-    output_lines = [
-        f"- Event Description: {e['description']}\n  Date: {e['date']}\n  Type: {e['type']}\n  Value: {e['value']}"
-        for e in sorted_events
+    # Comprehensive queries focusing on accuracy and official sources
+    queries = [
+        # Official press releases (most accurate)
+        f'"{company_name}" acquisition merger site:prnewswire.com 2015..2025',
+        f'"{company_name}" acquisition merger site:businesswire.com 2015..2025',
+        f'"{company_name}" "investor relations" acquisition merger 2015..2025',
+        
+        # Major news sources (verified reporting)
+        f'"{company_name}" acquisition deal site:reuters.com 2015..2025',
+        f'"{company_name}" merger acquisition site:bloomberg.com 2015..2025',
+        f'"{company_name}" M&A transaction site:wsj.com 2015..2025',
+        
+        # Specific deal types
+        f'"{company_name}" "announced definitive" merger OR acquisition 2015..2025',
+        f'"{company_name}" "completed acquisition" OR "closes acquisition" OR "acquisition complete" 2015..2025',
+        f'"{company_name}" "agreed to acquire" OR "to acquire" billion OR million 2015..2025',
+        f'"{company_name}" "sold" OR "divest" OR "divestiture" OR "sale of" 2015..2025',
+        
+        # IHS Markit merger (if S&P Global)
+        f'"{company_name}" "IHS Markit" merger 2020 2021 2022',
+        
+        # Value-specific
+        f'"{company_name}" acquisition "$" billion 2015..2025',
+        f'"{company_name}" acquisition "$" million 2015..2025',
+        
+        # Recent deals
+        f'"{company_name}" acquisition 2024 2025',
+        f'"{company_name}" "Visible Alpha" OR "With Intelligence" OR "Kensho" OR "SNL Financial"',
     ]
-    return "\n\n".join(output_lines)
+
+    search_results = []
+    seen_urls = set()
+    
+    for q in queries:
+        results = search(q)
+        # Deduplicate by URL
+        for result in results:
+            url = result.get('link', '')
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                search_results.append(result)
+        time.sleep(0.6)  # Slightly faster to get through more queries
+
+    if not search_results:
+        print("No search results found")
+        return []
+
+    # Format context with more structure - include MORE results
+    context = ""
+    for i, result in enumerate(search_results[:60], 1):  # Increased from 40 to 60
+        context += f"[{i}] {result['title']}\n{result['snippet']}\nSource: {result['link']}\n\n"
+
+    prompt = f'''You are a precise financial data analyst extracting corporate M&A events for "{company_name}". 
+
+TASK: Extract ONLY verified, accurate events from 2015-2025 based on the search results. Return up to {max_events} events.
+
+ACCURACY IS CRITICAL - Only include events you can verify from the search results. Do NOT make up or guess any details.
+
+For EACH verified event, extract these EXACT fields:
+
+1. **date**: Exact date in format "MMM DD, YYYY" (e.g., "Nov 30, 2020", "Feb 28, 2022")
+   - Extract from press releases, news articles, or official announcements
+   - If only month/year known, use "MMM 1, YYYY" or "MMM DD, YYYY" best estimate
+
+2. **event_short**: Precise description following these patterns:
+   - Announcement: "[Company A] and [Company B] announced definitive merger" OR "[Company] acquired [Target] to [purpose]"
+   - Completion: "Completion of [Company]'s merger with [Target] (close of the $XB transaction)"
+   - Acquisition: "Acquired [Target] to [brief purpose]"
+   - Sale: "Sold [Asset/Division] to [Buyer]"
+   - Agreement: "Agreement to sell [Asset] to [Buyer]"
+   - Keep it concise: 10-20 words maximum
+
+3. **event_type**: Use EXACTLY one of these (match case exactly):
+   - "Merger / acquisition announcement"
+   - "Merger / close"
+   - "Acquisition"
+   - "Acquisition (agreement)"
+   - "Divestiture / sale"
+   - "Divestiture (agreement)"
+   - "Divestiture (close)"
+   - "Joint-venture sale"
+
+4. **value_usd**: Format EXACTLY as shown in these examples:
+   - "$44,000,000,000 (enterprise value)"
+   - "$2,225,000,000 (cash)"
+   - "$550,000,000 (mix of cash & stock; net of cash acquired)"
+   - "$975,000,000 (cash; subject to adjustments)"
+   - "$975,000,000 (cash received; subject to adjustments — net after-tax proceeds noted)"
+   - "Reported / estimated > $500,000,000 (company did not disclose; FT reported ~'more than $500M')"
+   - "$1,800,000,000 (cash / announced purchase price)"
+   - "$3,100,000,000 (enterprise value; proceeds split with CME)"
+   
+   Rules for value formatting:
+   - Always use commas: $44,000,000,000 NOT $44000000000
+   - Convert billions: "$2.2B" → "$2,200,000,000"
+   - Convert millions: "$550M" → "$550,000,000"
+   - Include transaction type in parentheses: (enterprise value), (cash), (mix of cash & stock)
+   - Add context when relevant: "subject to adjustments", "net of cash acquired", "proceeds split"
+   - If undisclosed but estimated: "Reported / estimated > $X" with source
+
+CRITICAL EXTRACTION RULES:
+✓ For major mergers: Extract BOTH announcement date AND completion date as separate events
+✓ Match company names exactly as they appear in sources
+✓ Extract actual transaction values - convert "billion" and "million" to full numbers
+✓ Distinguish between: announcement, agreement, and completion/close
+✓ Include target company names and brief purpose when available
+✓ For divestitures: note what was sold and to whom
+✓ Only include M&A transactions - NO earnings, conferences, partnerships without transactions
+
+VERIFICATION: Cross-reference dates and values across multiple sources when possible.
+
+Search results to analyze:
+{context}
+
+Return ONLY valid JSON array (no markdown, no explanation):
+[
+  {{
+    "date": "Nov 30, 2020",
+    "event_short": "S&P Global and IHS Markit announced definitive all-stock merger (IHS Markit valued)",
+    "event_type": "Merger / acquisition announcement",
+    "value_usd": "$44,000,000,000 (enterprise value)"
+  }},
+  {{
+    "date": "Feb 28, 2022",
+    "event_short": "Completion of S&P Global's merger with IHS Markit (close of the $44B transaction)",
+    "event_type": "Merger / close",
+    "value_usd": "$44,000,000,000 (enterprise value)"
+  }}
+]
+
+JSON:'''
+
+    try:
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "anthropic/claude-3.5-sonnet:beta",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,  # Slightly increased for more creative extraction
+                "max_tokens": 16000  # Increased to allow more events
+            },
+            timeout=180
+        )
+        response.raise_for_status()
+        raw = response.json()["choices"][0]["message"]["content"].strip()
+
+        # Extract JSON
+        start = raw.find('[')
+        end = raw.rfind(']') + 1
+        if start == -1 or end == 0:
+            print("No JSON found in response")
+            return []
+
+        events = json.loads(raw[start:end])
+
+        # Transform to match your table structure
+        result = []
+        for i, e in enumerate(events[:max_events], 1):
+            result.append({
+                "Date": str(e.get("date", "Unknown")).strip(),
+                "Event (short)": str(e.get("event_short", e.get("event", "Unknown event"))).strip(),
+                "Event type": str(e.get("event_type", e.get("type", "Unknown"))).strip(),
+                "Event value (USD)": str(e.get("value_usd", e.get("value", "Undisclosed"))).strip()
+            })
+
+        print(f"SUCCESS: {len(result)} corporate events loaded for {company_name}")
+        return result
+
+    except Exception as e:
+        print(f"Event generation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+# ===========================================
 
 # ============================================================
 # 🔹 Company Summary Generator

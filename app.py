@@ -118,33 +118,62 @@ st.markdown("#### Discover insights, analyze companies, and generate instant val
 # 🔹 Helper Functions
 # ============================================================
 
-def show_corporate_events(corporate_events):
-    """Render corporate events as a clean table."""
-    if isinstance(corporate_events, str):
-        corporate_events = normalize_corporate_events(corporate_events)
+# ============================================
+# FILE 2: display_events.py (or your UI file)
+# ============================================
 
-    if isinstance(corporate_events, list) and corporate_events:
-        df = pd.DataFrame(corporate_events)
-        if "date" in df.columns:
-            df["sort_date"] = pd.to_datetime(df["date"], errors="coerce")
-            df = df.sort_values("sort_date", ascending=False).drop("sort_date", axis=1)
-        
-        rename_map = {
-            "date": "Date",
-            "description": "Event Description",
-            "type": "Type",
-            "value": "Value"
+def show_corporate_events(corporate_events):
+    """
+    Displays corporate events in a Streamlit dataframe.
+    
+    Args:
+        corporate_events: List of event dictionaries or JSON string
+    """
+    import pandas as pd
+    import streamlit as st
+    import json
+    
+    if isinstance(corporate_events, str):
+        try:
+            corporate_events = json.loads(corporate_events)
+        except:
+            st.warning("Could not parse corporate events.")
+            return
+
+    if not corporate_events or not isinstance(corporate_events, list):
+        st.info("No corporate events found.")
+        return
+
+    df = pd.DataFrame(corporate_events)
+
+    # Auto-detect and sort by date
+    date_col = next((col for col in ["Date", "date"] if col in df.columns), None)
+    if date_col:
+        df["sort_date"] = pd.to_datetime(df[date_col], errors="coerce")
+        df = df.sort_values("sort_date", ascending=False).drop("sort_date", axis=1)
+
+    df = df.fillna("-")
+
+    # Match your exact column structure
+    display_cols = ["Date", "Event (short)", "Event type", "Event value (USD)"]
+    available_cols = [col for col in display_cols if col in df.columns]
+    
+    if not available_cols:
+        st.error("No valid event columns found.")
+        return
+
+    st.markdown("### 📊 Corporate Events Timeline")
+    st.dataframe(
+        df[available_cols],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Date": st.column_config.TextColumn("Date", width="small"),
+            "Event (short)": st.column_config.TextColumn("Event (short)", width="large"),
+            "Event type": st.column_config.TextColumn("Event type", width="medium"),
+            "Event value (USD)": st.column_config.TextColumn("Event value (USD)", width="medium"),
         }
-        df = df.rename(columns=rename_map)
-        df = df.fillna("-")
-        
-        cols = [c for c in ["Date", "Event Description", "Type", "Value"] if c in df.columns]
-        if cols:
-            st.dataframe(df[cols], width="stretch", hide_index=True)
-        else:
-            st.info("No valid corporate events data available.")
-    else:
-        st.warning("⚠️ No corporate events found or data is empty. Check DB entry for 'corporate_events' field.")
+    )
 
 def show_top_management(mgmt_data):
     """
@@ -339,7 +368,7 @@ if st.button("🚀 Analyze Company"):
             progress.progress(60)
 
             status.text("📅 Fetching corporate events...")
-            corporate_events = generate_corporate_events(search_query, text=wiki_text)
+            corporate_events = generate_corporate_events(search_query)
             progress.progress(75)
 
             status.text("👥 Fetching top management...")
@@ -351,8 +380,23 @@ if st.button("🚀 Analyze Company"):
             progress.progress(95)
 
             # Store report and search data
-            store_report(search_query, summary, description, json.dumps(corporate_events), json.dumps(mgmt_list))
-            store_search(search_query, wiki_text, summary, description, json.dumps(corporate_events), json.dumps(mgmt_list))
+            store_report(
+                search_query,
+                summary,
+                description,
+                json.dumps(corporate_events),
+                json.dumps(mgmt_list),
+            )
+            
+            store_search(
+                search_query,
+                wiki_text,
+                summary,
+                description,
+                json.dumps(corporate_events),
+                json.dumps(mgmt_list),
+            )
+            
 
             st.success("✅ Company data successfully fetched!")
             progress.progress(100)
@@ -378,10 +422,10 @@ if st.button("🚀 Analyze Company"):
 
 
             events_text = f"\n\nCorporate Events:\n{json.dumps(corporate_events)}" if corporate_events else ""
-            mgmt_text_pdf = f"\n\nTop Management:\n{mgmt_text}" if mgmt_text else ""
-            pdf_file = create_pdf_from_text(title=search_query, summary=f"{description}\n\n{summary}{events_text}{mgmt_text_pdf}")
+            # mgmt_text_pdf = f"\n\nTop Management:\n{mgmt_text}" if mgmt_text else ""
+            # pdf_file = create_pdf_from_text(title=search_query, summary=f"{description}\n\n{summary}{events_text}{mgmt_text_pdf}")
 
-            st.download_button("📄 Download PDF", data=pdf_file, file_name=f"{search_query.replace(' ', '_')}.pdf", mime="application/pdf")
+            # st.download_button("📄 Download PDF", data=pdf_file, file_name=f"{search_query.replace(' ', '_')}.pdf", mime="application/pdf")
 
         except Exception as e:
             status.text("")
@@ -397,37 +441,38 @@ reports = get_reports()
 if reports:
     for idx, r in enumerate(reports):
         with st.expander(f"📊 {r.get('company', 'Unknown Company')}"):
+            
+            # Summary
             st.subheader("📈 Valuation Summary Report")
             st.write(r.get('summary', 'No summary available.'))
 
+            # Description
             st.subheader("🏢 Company Description")
             st.write(r.get('description', 'No description available.'))
 
+            # Events
             st.subheader("📅 Corporate Events")
             corp_data_raw = r.get("corporate_events")
 
-            # ✅ Ensure the data is a valid Python list
+            corp_data = []
             if isinstance(corp_data_raw, str):
                 try:
                     corp_data = json.loads(corp_data_raw)
-                    if isinstance(corp_data, str):  # Handle nested JSON strings
+                    if isinstance(corp_data, str):  
                         corp_data = json.loads(corp_data)
                 except:
-                    corp_data = normalize_corporate_events(corp_data_raw)
-            else:
-                corp_data = corp_data_raw or []
+                    corp_data = []
+            elif isinstance(corp_data_raw, list):
+                corp_data = corp_data_raw
 
             show_corporate_events(corp_data)
 
+            # Management
             st.subheader("👥 Top Management")
             mgmt_list = normalize_top_management(r.get("top_management"))
             show_top_management(mgmt_list)
 
-            pdf_file = create_pdf_from_text(
-                title=r.get('company', 'Report'),
-                summary=f"{r.get('description', '')}\n\n{r.get('summary', '')}"
-            )
-
+            # Subsidiaries
             st.subheader("🏢 Subsidiaries")
             subsidiaries_data = get_subsidiaries(r.get("company", ""))
             if subsidiaries_data:
@@ -435,73 +480,16 @@ if reports:
             else:
                 st.info("No subsidiaries found for this company.")
 
+            # PDF Download
+            # pdf_file = create_pdf_from_text(
+            #     title=r.get('company', 'Report'),
+            #     summary=f"{r.get('description', '')}\n\n{r.get('summary', '')}"
+            # )
+            # st.download_button(
+            #     "📄 Download PDF",
+            #     data=pdf_file,
+            #     file_name=f"{r.get('company', 'report').replace(' ', '_')}.pdf",
+            #     mime="application/pdf",
+            #     key=f"download_report_{idx}"
+            # )
 
-            st.download_button(
-                "📄 Download PDF",
-                data=pdf_file,
-                file_name=f"{r.get('company', 'report').replace(' ', '_')}.pdf",
-                mime="application/pdf",
-                key=f"download_report_{idx}"
-            )
-
-# ============================================================
-# 🔹 Previous Search History
-# ============================================================
-st.divider()
-st.subheader("🕘 Previous Search History")
-
-history = get_search_history()
-if history:
-    seen_queries = set()
-    for idx, h in enumerate(history):
-        query = h.get('query', 'Unknown Query')
-        if query in seen_queries:
-            continue
-        seen_queries.add(query)
-
-        with st.expander(f"🔎 {query}"):
-            st.markdown(f"**AI Description:**\n{h.get('description', '')}")
-            st.markdown(f"**AI Summary:**\n{h.get('summary', '')}")
-
-            st.subheader("📅 Corporate Events")
-            corp_data_raw = r.get("corporate_events")
-
-              # ✅ Add this import once at the top of app.py (if not already)
-
-            # ✅ Ensure corporate events are always parsed into a list of dicts
-            corp_data = []
-            if corp_data_raw:
-                if isinstance(corp_data_raw, str):
-                    try:
-                        corp_data = json.loads(corp_data_raw)
-                        if isinstance(corp_data, str):
-                            corp_data = json.loads(corp_data)
-                    except Exception:
-                        try:
-                            corp_data = ast.literal_eval(corp_data_raw)
-                        except Exception:
-                            corp_data = normalize_corporate_events(corp_data_raw)
-                elif isinstance(corp_data_raw, list):
-                    corp_data = corp_data_raw
-
-            # ✅ Normalize format (convert text → dict if needed)
-            corp_data = normalize_corporate_events(corp_data)
-
-            # ✅ Display like live analysis (table form)
-            show_corporate_events(corp_data)
-
-
-
-
-            st.subheader("👥 Top Management")
-            mgmt_list = normalize_top_management(h.get("top_management"))
-            show_top_management(mgmt_list)
-
-            st.subheader("🏢 Subsidiaries")
-            show_subsidiaries(get_subsidiaries(query))
-
-            pdf_file = create_pdf_from_text(
-                title=query,
-                summary=f"{h.get('description', '')}\n\n{h.get('summary', '')}"
-            )
-            st.download_button("📄 Download PDF", data=pdf_file, file_name=f"{query.replace(' ', '_')}.pdf", mime="application/pdf", key=f"download_history_{idx}")
