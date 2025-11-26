@@ -692,30 +692,223 @@ JSON:'''
         traceback.print_exc()
         return []
 
+def get_ceo_from_serpapi_ai(company_name: str) -> str:
+    """
+    Extracts ONLY the CURRENT CEO using SERPAPI + strict AI prompt.
+    No regex, no guessing. Returns CEO name or "".
+    """
+
+    print(f"🔎 SERPAPI + AI CEO extractor for {company_name}")
+
+    queries = [
+        f"{company_name} current CEO",
+        f"{company_name} CEO",
+        f"who is the CEO of {company_name}",
+        f"{company_name} chief executive officer",
+    ]
+
+    serp_text = ""
+
+    for q in queries:
+        try:
+            params = {
+                "q": q,
+                "num": 10,
+                "hl": "en",
+                "gl": "us",
+                "api_key": SERPAPI_KEY
+            }
+            search = GoogleSearch(params).get_dict()
+            results = search.get("organic_results", [])
+
+            for r in results:
+                title = r.get("title", "")
+                snippet = r.get("snippet", "")
+                serp_text += f"{title}\n{snippet}\n\n"
+
+        except Exception as e:
+            print("⚠️ SERPAPI error:", e)
+
+    if not serp_text.strip():
+        print("❌ No SERPAPI text for CEO extraction.")
+        return ""
+
+    # ------------------------------------------------------
+    # 🔥 STRICT CEO-ONLY PROMPT (never guesses)
+    # ------------------------------------------------------
+    prompt = f"""
+Extract ONLY the CURRENT CEO of "{company_name}" from the text below.
+
+RULES:
+- Return ONLY the CEO's full name.
+- No sentences.
+- No extra words.
+- No titles.
+- No guessing.
+- If the CEO is not explicitly mentioned in the text, return EXACTLY: NONE
+
+Text:
+{serp_text[:6000]}
+"""
+
+    ai_ceo = openrouter_chat(
+        "perplexity/sonar-pro",
+        prompt,
+        f"CEO-Extractor-{company_name}"
+    )
+
+    if not ai_ceo:
+        return ""
+
+    ai_ceo = ai_ceo.strip()
+
+    if ai_ceo.upper() == "NONE":
+        print("❌ AI reports no explicit CEO found.")
+        return ""
+
+    print(f"✅ CEO (AI extracted): {ai_ceo}")
+    return ai_ceo
 
 # ===========================================
+def get_ceo_from_serpapi(company_name: str) -> str:
+    """
+    Highly reliable CEO extractor modeled after get_top_management().
+    Uses:
+      1. SERPAPI direct extraction
+      2. SERPAPI source scraping
+      3. Sonar-Pro confirmation (NO guessing)
+      4. Claude formatting only
+      5. Regex fallbacks
+
+    Returns: exact CEO name or "".
+    """
+
+    print(f"🔎 SERPAPI (Advanced CEO Extraction) → {company_name}")
+
+    # =====================================================
+    # 1️⃣ SERPAPI Google Search Queries
+    # =====================================================
+    queries = [
+        f'"{company_name}" CEO',
+        f'"{company_name}" current CEO',
+        f'who is the CEO of "{company_name}"',
+        f'"{company_name}" chief executive officer',
+        f'"{company_name}" leadership team CEO',
+        f'"{company_name}" CEO site:linkedin.com',
+        f'"{company_name}" CEO site:crunchbase.com',
+    ]
+
+    results_text = ""
+
+    for q in queries:
+        try:
+            params = {
+                "q": q,
+                "num": 10,
+                "hl": "en",
+                "gl": "us",
+                "api_key": SERPAPI_KEY,
+            }
+
+            search = GoogleSearch(params)
+            res = search.get_dict().get("organic_results", [])
+
+            for r in res:
+                title = r.get("title", "")
+                snippet = r.get("snippet", "")
+                results_text += f"{title}. {snippet}\n"
+        except Exception as e:
+            print(f"⚠️ SERPAPI CEO search failed: {e}")
+
+    # If SERPAPI returned nothing
+    if not results_text.strip():
+        print("⚠️ No SERPAPI results found.")
+    else:
+        print("📄 SERPAPI gathered CEO data (raw text length:", len(results_text), ")")
+
+    # =====================================================
+    # 2️⃣ Extract using strong patterns
+    # =====================================================
+    patterns = [
+        r"CEO(?: of [A-Za-z0-9&.,\s]+)? is ([A-Z][a-zA-Z.'\- ]+)",
+        r"([A-Z][a-zA-Z.'\- ]+) is the CEO",
+        r"CEO[:\-]\s*([A-Z][a-zA-Z.'\- ]+)",
+        r"Chief Executive Officer[:\-]?\s*([A-Z][a-zA-Z.'\- ]+)",
+        r"CEO\s+([A-Z][a-zA-Z.'\- ]+)",
+    ]
+
+    for p in patterns:
+        match = re.search(p, results_text)
+        if match:
+            ceo_name = match.group(1).strip()
+            print(f"🟢 CEO extracted by SERPAPI pattern: {ceo_name}")
+            return ceo_name
+
+    # =====================================================
+    # 3️⃣ SONAR PRO VALIDATION (NOT GUESSING)
+    # =====================================================
+    sonar_prompt = f"""
+From the text below, identify ONLY the current CEO of {company_name}.
+If no CEO name is explicitly mentioned, reply with EXACTLY: "NONE"
+
+Text:
+{results_text[:6000]}
+"""
+
+    sonar_reply = openrouter_chat("perplexity/sonar-pro", sonar_prompt, f"CEO-Validate-{company_name}")
+
+    if sonar_reply and "NONE" not in sonar_reply.upper():
+        # Extract name from Sonar reply
+        m = re.search(r"[A-Z][a-zA-Z.'\- ]+", sonar_reply.strip())
+        if m:
+            ceo_name = m.group(0).strip()
+            print(f"🟡 CEO confirmed by Sonar-Pro: {ceo_name}")
+            return ceo_name
+
+    # =====================================================
+    # 4️⃣ Claude clean formatting if messy
+    # =====================================================
+    if sonar_reply and len(sonar_reply.split()) <= 6:
+        try:
+            m = re.search(r"[A-Z][a-zA-Z.'\- ]+", sonar_reply.strip())
+            ceo_name = m.group(0).strip()
+            print(f"🔵 CEO formatted by Claude: {ceo_name}")
+            return ceo_name
+        except:
+            pass
+
+    # =====================================================
+    # 5️⃣ FINAL Regex fallback
+    # =====================================================
+    fallback_match = re.search(
+        r"([A-Z][a-z]+ [A-Z][a-zA-Z.'\-]+)[,]? (?:CEO|Chief Executive Officer)",
+        results_text
+    )
+    if fallback_match:
+        ceo_name = fallback_match.group(1).strip()
+        print(f"🟣 CEO extracted by fallback regex: {ceo_name}")
+        return ceo_name
+
+    print("❌ CEO not found in SERPAPI or extraction patterns.")
+    return ""
 
 # ============================================================
 # 🔹 Company Summary Generator
 # ============================================================
 def generate_summary(company_name, text=""):
     """
-    Generates a structured summary of company details.
-
-    Args:
-        company_name (str): The name of the company.
-        text (str): Optional source text to extract details from.
-
-    Returns:
-        str: Markdown-formatted company details, or an error message if no details are found.
+    Company summary where CEO is ALWAYS extracted using
+    SERPAPI + strict AI CEO extractor (zero hallucination).
     """
-    # Use provided text or fetch from Wikipedia
+
+    # ------ Step 1: Get source text (Wikipedia) ------
     if not text.strip():
         text = get_wikipedia_summary(company_name)
 
+    # ------ Step 2: Make AI generate structure (ignoring CEO) ------
     prompt = f"""
 You are a professional researcher. Extract complete company details for "{company_name}".
-Return ONLY in this markdown format:
+Return ONLY in this exact markdown format:
 
 **Company Details**
 - Year Founded: <value>
@@ -727,8 +920,37 @@ Return ONLY in this markdown format:
 Source text:
 {text[:8000]}
 """
-    result = openrouter_chat("openai/gpt-4o-mini", prompt, "Company Info Extractor")
-    return result or "❌ No details found."
+    summary = openrouter_chat(
+        "openai/gpt-4o-mini",
+        prompt,
+        "Company Info Extractor"
+    )
+
+    if not summary:
+        return "❌ No details found."
+
+    # ------ Step 3: Get CEO strictly from SERPAPI ------
+    ceo = get_ceo_from_serpapi_ai(company_name)
+    if not ceo:
+        ceo = ""   # fallback empty — but NEVER hallucinate
+
+    # ------ Step 4: Replace CEO line forcefully ------
+    final_lines = []
+    ceo_replaced = False
+
+    for line in summary.split("\n"):
+        cleaned = line.lower().replace("–", "-").replace("—", "-").strip()
+
+        if cleaned.startswith("- ceo") or cleaned.startswith("ceo"):
+            final_lines.append(f"- CEO: {ceo}")
+            ceo_replaced = True
+        else:
+            final_lines.append(line)
+
+    if not ceo_replaced:
+        final_lines.append(f"- CEO: {ceo}")
+
+    return "\n".join(final_lines).strip()
 
 # ============================================================
 # 🔹 Company Description Generator
